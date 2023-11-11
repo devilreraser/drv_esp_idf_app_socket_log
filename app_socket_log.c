@@ -13,8 +13,6 @@
  **************************************************************************** */
 #include "app_socket_log.h"
 
-#if CONFIG_APP_SOCKET_LOG_USE
-
 #include <sdkconfig.h>
 #include <string.h>
 #include <stdint.h>
@@ -25,19 +23,19 @@
 #include "freertos/semphr.h"
 
 #include "drv_socket.h"
-#include "app_socket.h"
 
 #include "esp_event.h"
 #include "esp_log.h"
 
-#include "drv_console_if.h"
+#if CONFIG_DRV_CONSOLE_USE
+#include "drv_console.h"
+#endif
 
 /* *****************************************************************************
  * Configuration Definitions
  **************************************************************************** */
 #define TAG "app_socket_log"
 
-#define USE_LOG_REDIRECT_KEEP_STDOUT    1
 
 #define APP_SOCKET_LOG_SEND_BUFFER_SIZE  (2 * 1024)
 #define APP_SOCKET_LOG_RECV_BUFFER_SIZE  256
@@ -66,19 +64,9 @@
  * Variables Definitions
  **************************************************************************** */
 
-#if CONFIG_SYSTEM_USE_STREAM_BUFFER
+
 StreamBufferHandle_t log_stream_buffer_send = NULL;
 StreamBufferHandle_t log_stream_buffer_recv = NULL;
-#else
-drv_stream_t log_stream_send = 
-{
-    "tx_log", NULL, 0, false, NULL, APP_SOCKET_LOG_SEND_BUFFER_SIZE,
-};
-drv_stream_t log_stream_recv = 
-{
-    "rx_log", NULL, 0, false, NULL, APP_SOCKET_LOG_RECV_BUFFER_SIZE,
-};
-#endif
 
 
 drv_socket_t socket_log = 
@@ -117,13 +105,8 @@ drv_socket_t socket_log =
     .address_family = AF_INET,
     .protocol = IPPROTO_IP,
     .protocol_type = SOCK_STREAM,
-#if CONFIG_SYSTEM_USE_STREAM_BUFFER
     .pSendStreamBuffer = {&log_stream_buffer_send},
     .pRecvStreamBuffer = {&log_stream_buffer_recv},
-#else
-    .pSendStream = {&log_stream_send},
-    .pRecvStream = {&log_stream_recv},
-#endif
 };
 
  SemaphoreHandle_t flag_log_busy = NULL;
@@ -141,17 +124,23 @@ int log_vprintf_stdout(const char *fmt, va_list args)
 {
     size_t size_string;  
     size_string = vsnprintf(NULL, 0, fmt, args);
-    if (drv_console_get_log_disabled()) return size_string;
 
     xSemaphoreTake(flag_log_busy, portMAX_DELAY);
 
+    #if CONFIG_DRV_CONSOLE_USE
+    #if CONFIG_DRV_CONSOLE_CUSTOM
+    #if CONFIG_DRV_CONSOLE_CUSTOM_LOG_DISABLE_FIX
+    if (drv_console_get_log_disabled()) return size_string;
     bool needed_finish_line = drv_console_is_needed_finish_line();
-
     if (needed_finish_line) 
     {
         va_list dummy;
         vprintf("\r\n", dummy);
     }
+    #endif
+    #endif
+    #endif
+
     vprintf(fmt, args);
 
     xSemaphoreGive(flag_log_busy);
@@ -163,30 +152,48 @@ int log_vprintf(const char *fmt, va_list args)
 {
     size_t size_string;  
     size_string = vsnprintf(NULL, 0, fmt, args);
-    if (drv_console_get_log_disabled()) return size_string;
 
     xSemaphoreTake(flag_log_busy, portMAX_DELAY);
-
-    bool needed_finish_line = drv_console_is_needed_finish_line();
 
     char *string;
     string = (char *)malloc(size_string+1);
     vsnprintf(string, size_string+1, fmt, args);
     size_string = strlen(string);
+
+    #if CONFIG_DRV_CONSOLE_USE
+    #if CONFIG_DRV_CONSOLE_CUSTOM
+    #if CONFIG_DRV_CONSOLE_CUSTOM_LOG_DISABLE_FIX
+    if (drv_console_get_log_disabled()) return size_string;
+    bool needed_finish_line = drv_console_is_needed_finish_line();
     if (needed_finish_line) app_socket_log_send("\r\n", 2);
+    #endif
+    #endif
+    #endif
+
     size_string = app_socket_log_send(string, size_string);
 
     free(string);
 
-    #if USE_LOG_REDIRECT_KEEP_STDOUT
 
+
+    #if CONFIG_APP_SOCKET_LOG_REDIRECT_KEEP_STDOUT
+
+    #if CONFIG_DRV_CONSOLE_USE
+    #if CONFIG_DRV_CONSOLE_CUSTOM
+    #if CONFIG_DRV_CONSOLE_CUSTOM_LOG_DISABLE_FIX
     if (needed_finish_line) 
     {
         va_list dummy;
         vprintf("\r\n", dummy);
     }
-    vprintf(fmt, args);
     #endif
+    #endif
+    #endif
+
+    vprintf(fmt, args);
+
+    #endif  /* #if CONFIG_APP_SOCKET_LOG_REDIRECT_KEEP_STDOUT */
+
 
     xSemaphoreGive(flag_log_busy);
 
@@ -230,13 +237,8 @@ void app_socket_log_init(void)
     }
     xSemaphoreGive(flag_log_busy);
     
-    #if CONFIG_SYSTEM_USE_STREAM_BUFFER
-    drv_stream_buffer_init(socket_log.pSendStreamBuffer[0], APP_SOCKET_LOG_SEND_BUFFER_SIZE, "log_sock_send");
-    drv_stream_buffer_init(socket_log.pRecvStreamBuffer[0], APP_SOCKET_LOG_RECV_BUFFER_SIZE, "log_sock_recv");
-    #else
-    drv_stream_init(socket_log.pSendStream[0], NULL, 0);
-    drv_stream_init(socket_log.pRecvStream[0], NULL, 0);
-    #endif
+    drv_stream_init(socket_log.pSendStreamBuffer[0], APP_SOCKET_LOG_SEND_BUFFER_SIZE, "log_sock_send");
+    drv_stream_init(socket_log.pRecvStreamBuffer[0], APP_SOCKET_LOG_RECV_BUFFER_SIZE, "log_sock_recv");
 }
 
 void app_socket_log_task(void)
@@ -251,19 +253,15 @@ int app_socket_log_send(const char* pData, int size)
         //ESP_LOGI(TAG, "app_socket_log_send %d bytes", size);    esp log here not permitted
         //ESP_LOG_BUFFER_CHAR(TAG, pData, size);
 
-          
-        #if CONFIG_SYSTEM_USE_STREAM_BUFFER
+        #if 0
         app_socket_log_send_counter++;
         if ((app_socket_log_send_counter % 1000) == 0)
         { 
             ESP_LOGI(TAG, "StreamBufferSend %d", app_socket_log_send_counter);
         } 
-        return drv_stream_buffer_push(socket_log.pSendStreamBuffer[0], (uint8_t*)pData, size);
-        #else
-        return drv_stream_push(socket_log.pSendStream[0], (uint8_t*)pData, size);
         #endif
 
-
+        return drv_stream_push(socket_log.pSendStreamBuffer[0], (uint8_t*)pData, size);
     }
     else
     {
@@ -278,17 +276,10 @@ int app_socket_log_recv(char* pData, int size)
         //ESP_LOGI(TAG, "app_socket_log_recv %d bytes", size);
         //ESP_LOG_BUFFER_CHAR(TAG, pData, size);
         
-        #if CONFIG_SYSTEM_USE_STREAM_BUFFER
-        return drv_stream_buffer_pull(socket_log.pRecvStreamBuffer[0], (uint8_t*)pData, size);
-        #else
-        return drv_stream_pull(socket_log.pRecvStream[0], (uint8_t*)pData, size); 
-        #endif
-        //return 0; 
+        return drv_stream_pull(socket_log.pRecvStreamBuffer[0], (uint8_t*)pData, size);
     }
     else
     {
         return 0;
     }
 }
-
-#endif //#if CONFIG_APP_SOCKET_LOG_USE

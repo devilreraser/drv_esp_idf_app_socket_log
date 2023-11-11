@@ -1,7 +1,11 @@
-menu "Component app_socket_stdio Configuration"
+menu "Component app_socket_log Configuration"
 
     config APP_SOCKET_LOG_USE
         bool "Use app socket log  (application socket log)"
+        default y
+    
+    config APP_SOCKET_LOG_REDIRECT_KEEP_STDOUT
+        bool "redirect log via socket keeps output log also to stdout"
         default y
     
 endmenu
