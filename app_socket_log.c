@@ -123,14 +123,18 @@ drv_socket_t socket_log =
 int log_vprintf_stdout(const char *fmt, va_list args)
 {
     size_t size_string;  
+    xSemaphoreTake(flag_log_busy, portMAX_DELAY);
     size_string = vsnprintf(NULL, 0, fmt, args);
 
-    xSemaphoreTake(flag_log_busy, portMAX_DELAY);
 
     #if CONFIG_DRV_CONSOLE_USE
     #if CONFIG_DRV_CONSOLE_CUSTOM
     #if CONFIG_DRV_CONSOLE_CUSTOM_LOG_DISABLE_FIX
-    if (drv_console_get_log_disabled()) return size_string;
+    if (drv_console_get_log_disabled()) 
+    {
+        xSemaphoreGive(flag_log_busy);
+        return size_string;
+    }
     bool needed_finish_line = drv_console_is_needed_finish_line();
     if (needed_finish_line) 
     {
@@ -144,36 +148,43 @@ int log_vprintf_stdout(const char *fmt, va_list args)
     vprintf(fmt, args);
 
     xSemaphoreGive(flag_log_busy);
-
     return size_string;
 }
 
 int log_vprintf(const char *fmt, va_list args)
 {
     size_t size_string;  
+    xSemaphoreTake(flag_log_busy, portMAX_DELAY);
     size_string = vsnprintf(NULL, 0, fmt, args);
 
-    xSemaphoreTake(flag_log_busy, portMAX_DELAY);
-
+    bool needed_finish_line = false;
     char *string;
     string = (char *)malloc(size_string+1);
-    vsnprintf(string, size_string+1, fmt, args);
-    size_string = strlen(string);
 
-    #if CONFIG_DRV_CONSOLE_USE
-    #if CONFIG_DRV_CONSOLE_CUSTOM
-    #if CONFIG_DRV_CONSOLE_CUSTOM_LOG_DISABLE_FIX
-    if (drv_console_get_log_disabled()) return size_string;
-    bool needed_finish_line = drv_console_is_needed_finish_line();
-    if (needed_finish_line) app_socket_log_send("\r\n", 2);
-    #endif
-    #endif
-    #endif
+    if (string != NULL)
+    {
+        vsnprintf(string, size_string+1, fmt, args);
+        size_string = strlen(string);
 
-    size_string = app_socket_log_send(string, size_string);
+        #if CONFIG_DRV_CONSOLE_USE
+        #if CONFIG_DRV_CONSOLE_CUSTOM
+        #if CONFIG_DRV_CONSOLE_CUSTOM_LOG_DISABLE_FIX
+        if (drv_console_get_log_disabled()) 
+        {
+            free(string);
+            xSemaphoreGive(flag_log_busy);
+            return size_string;
+        }
+        needed_finish_line = drv_console_is_needed_finish_line();
+        if (needed_finish_line) app_socket_log_send("\r\n", 2);
+        #endif
+        #endif
+        #endif
 
-    free(string);
+        size_string = app_socket_log_send(string, size_string);
 
+        free(string);
+    }
 
 
     #if CONFIG_APP_SOCKET_LOG_REDIRECT_KEEP_STDOUT
@@ -196,7 +207,6 @@ int log_vprintf(const char *fmt, va_list args)
 
 
     xSemaphoreGive(flag_log_busy);
-
     return size_string;
 }
 
