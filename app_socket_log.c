@@ -17,6 +17,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdarg.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -39,6 +40,8 @@
 
 #define APP_SOCKET_LOG_SEND_BUFFER_SIZE  (2 * 1024)
 #define APP_SOCKET_LOG_RECV_BUFFER_SIZE  256
+
+#define APP_SOCKET_LOG_NON_BLOCKING_USE_VPRINTF     0   /* no any benefits - left here only for example for wrapper */
 
 /* *****************************************************************************
  * Constants and Macros Definitions
@@ -63,6 +66,14 @@
 /* *****************************************************************************
  * Variables Definitions
  **************************************************************************** */
+
+#if CONFIG_DRV_CONSOLE_USE && CONFIG_DRV_CONSOLE_LOG_NON_BLOCKING
+#define NON_BLOCKING_LOG_QUEUE_SIZE 30
+static QueueHandle_t log_queue;
+#endif  //#if CONFIG_DRV_CONSOLE_USE && CONFIG_DRV_CONSOLE_LOG_NON_BLOCKING
+
+static int log_malloc_fail_count = -1;              /* initialize to -1 indicates non_blocking was never used */
+static int log_queued_fail_count = -1;              /* initialize to -1 indicates non_blocking was never used */
 
 
 StreamBufferHandle_t log_stream_buffer_send = NULL;
@@ -120,36 +131,75 @@ drv_socket_t socket_log =
 /* *****************************************************************************
  * Functions
  **************************************************************************** */
-int log_vprintf_stdout(const char *fmt, va_list args)
+
+#if CONFIG_DRV_CONSOLE_USE && CONFIG_DRV_CONSOLE_LOG_NON_BLOCKING
+
+static int non_blocking_vprintf(const char *fmt, va_list va)
 {
-    size_t size_string;  
-    xSemaphoreTake(flag_log_busy, portMAX_DELAY);
-    size_string = vsnprintf(NULL, 0, fmt, args);
-
-
-    #if CONFIG_DRV_CONSOLE_USE
-    #if CONFIG_DRV_CONSOLE_CUSTOM
-    #if CONFIG_DRV_CONSOLE_CUSTOM_LOG_DISABLE_FIX
-    if (drv_console_get_log_disabled()) 
+    char *log_str = malloc(256); // Allocate memory for log string
+    if (log_str == NULL) 
     {
-        xSemaphoreGive(flag_log_busy);
-        return size_string;
+        log_malloc_fail_count++;
+        return 0;
     }
-    bool needed_finish_line = drv_console_is_needed_finish_line();
-    if (needed_finish_line) 
+
+    vsnprintf(log_str, 256, fmt, va); // Format log string
+
+    if (xQueueSend(log_queue, &log_str, 0) != pdPASS) 
     {
-        va_list dummy;
-        vprintf("\r\n", dummy);
+        log_queued_fail_count++;
+        free(log_str); // Free memory if send failed
     }
-    #endif
-    #endif
-    #endif
 
-    vprintf(fmt, args);
-
-    xSemaphoreGive(flag_log_busy);
-    return size_string;
+    return 0;
 }
+
+
+void print_log_with_vprintf(const char *format, ...) 
+{
+    va_list args;
+    va_start(args, format); // Initialize va_list with the last fixed argument
+    vprintf(format, args);  // Use vprintf to print
+    va_end(args);           // Clean up the va_list
+}
+
+
+static void non_blocking_log_task(void *arg)
+{
+
+    log_queued_fail_count = 0;
+    log_malloc_fail_count = 0;
+
+    while (1) {
+        char *log_str = NULL;
+        if (xQueueReceive(log_queue, &log_str, portMAX_DELAY) == pdPASS) 
+        {
+            #if APP_SOCKET_LOG_NON_BLOCKING_USE_VPRINTF
+            print_log_with_vprintf("%s", log_str); // Call the wrapper function
+            #else
+            printf("%s", log_str); // Print log string
+            #endif
+            free(log_str); // Free log string memory
+        }
+
+    }
+}
+
+#endif  //#if CONFIG_DRV_CONSOLE_USE && CONFIG_DRV_CONSOLE_LOG_NON_BLOCKING
+
+int app_socket_non_blocking_log_malloc_fail_count_get(void)
+{
+    return log_malloc_fail_count;
+}
+
+int app_socket_non_blocking_log_queued_fail_count_get(void)
+{
+    return log_queued_fail_count;
+}
+
+
+
+
 
 int log_vprintf(const char *fmt, va_list args)
 {
@@ -195,13 +245,21 @@ int log_vprintf(const char *fmt, va_list args)
     if (needed_finish_line) 
     {
         va_list dummy;
+        #if CONFIG_DRV_CONSOLE_USE && CONFIG_DRV_CONSOLE_LOG_NON_BLOCKING
+        non_blocking_vprintf("\r\n", dummy);
+        #else
         vprintf("\r\n", dummy);
+        #endif
     }
     #endif
     #endif
     #endif
 
+    #if CONFIG_DRV_CONSOLE_USE && CONFIG_DRV_CONSOLE_LOG_NON_BLOCKING
+    non_blocking_vprintf(fmt, args);
+    #else
     vprintf(fmt, args);
+    #endif
 
     #endif  /* #if CONFIG_APP_SOCKET_LOG_REDIRECT_KEEP_STDOUT */
 
@@ -213,26 +271,25 @@ int log_vprintf(const char *fmt, va_list args)
 
 void app_socket_log_redirect_start(void)
 {
+    /* the queue must be created before use log_vprintf */
+    #if CONFIG_DRV_CONSOLE_USE && CONFIG_DRV_CONSOLE_LOG_NON_BLOCKING
+    log_queue = xQueueCreate(NON_BLOCKING_LOG_QUEUE_SIZE, sizeof(char *)); // Create queue for log task
+    #endif
     esp_log_set_vprintf(log_vprintf);
 }
 
-void app_socket_log_redirect_stdio(void)
+
+/* The task must be started after redirecting stdout, otherwise the log will not be redirected to stdout */
+void app_socket_log_non_blocking_task_start(void)
 {
-    if (flag_log_busy == NULL)
-    {
-        flag_log_busy = xSemaphoreCreateBinary();  
-    }
-    else
-    {
-        xSemaphoreTake(flag_log_busy, portMAX_DELAY);
-    }
-    xSemaphoreGive(flag_log_busy);
-    esp_log_set_vprintf(log_vprintf_stdout);
+    #if CONFIG_DRV_CONSOLE_USE && CONFIG_DRV_CONSOLE_LOG_NON_BLOCKING
+    xTaskCreate(non_blocking_log_task, "log_task", 2048, NULL, 12, NULL); // Create log task
+    #endif
 }
 
 void app_socket_log_redirect_stop(void)
 {
-    esp_log_set_vprintf(&vprintf);
+    esp_log_set_vprintf(vprintf);
 }
 
 void app_socket_log_init(void)

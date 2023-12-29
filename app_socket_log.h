@@ -47,8 +47,10 @@ extern "C"
 /* *****************************************************************************
  * Function Prototypes
  **************************************************************************** */
+int app_socket_non_blocking_log_malloc_fail_count_get(void);
+int app_socket_non_blocking_log_queued_fail_count_get(void);
 void app_socket_log_redirect_start(void);
-void app_socket_log_redirect_stdio(void);
+void app_socket_log_non_blocking_task_start(void);
 void app_socket_log_redirect_stop(void);
 void app_socket_log_init(void);
 void app_socket_log_task(void);
